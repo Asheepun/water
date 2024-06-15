@@ -1,228 +1,88 @@
-int N_NUMBERS = 2 * 524288;
-const int WORK_GROUP_SIZE = 128;
+struct Particle{
+	Vec2f pos;
+	Vec2f velocity;
+};
 
-Buffer bufferA;
-Buffer bufferB;
+//struct CollisionGridCell{
+	//int indices[4];
+	//int index;
+	//int n_indices;
+//};
 
-Vec2f *positions;
-Vec2f *velocities;
+int gridIndex(Vec2f pos, int bufferWidth){
+	return (int)pos.y * bufferWidth + (int)pos.x;
+}
 
-VkCommandBuffer commandBuffer;
-VkFence fence;
+int gridIndex(int x, int y, int bufferWidth){
+	return (int)y * bufferWidth + (int)x;
+}
+
+int gridIndex_buffered(Vec2f pos, int bufferWidth){
+	return ((int)pos.y + 1) * (bufferWidth + 2) + ((int)pos.x + 1);
+}
+
+const int WIDTH = (1920 / 2) / 2;
+const int HEIGHT = (1080 / 2) / 2;
+
+const int GRID_WIDTH = WIDTH / 4;
+const int GRID_HEIGHT = HEIGHT / 4;
+
+const float PARTICLE_GRAVITY = 0.06;
+
+//const int N_INDICES_PER_COLLISION_GRID_CELL = 4;
+
+Renderer2D_Renderer renderer;
+
+Texture screenTexture;
+uint8_t *screenPixels;
+
+Array<Particle> particles;
+bool *particleOccupiedGrid;
+
+Vec2f *edges;
+Vec2f *edgesPrevious;
+Vec2f *edgeMasses;
+
+//uint16_t collisionGrid[WIDTH * HEIGHT][N_INDICES_PER_COLLISION_GRID_CELL];
+//Vec2f collisionGrid[WIDTH * HEIGHT][N_INDICES_PER_COLLISION_GRID_CELL];
+Vec2f collisionGrid[WIDTH * HEIGHT][4];
+uint8_t collisionGridCounts[WIDTH * HEIGHT];
+
+Shader waterShader;
 
 void Engine_start(){
 
-	positions = (Vec2f *)malloc(N_NUMBERS * sizeof(float));
-	velocities = (Vec2f *)malloc(N_NUMBERS * sizeof(float));
+	Renderer2D_init(&renderer, WIDTH, HEIGHT, Engine_assetManager_p);
 
-	gvk_init();
+	Shader_init(&waterShader, "water", "shaders/opengl/renderer2d/color-vertex-shader.glsl",  "shaders/opengl/water-fragment-shader.glsl", Engine_assetManager_p);
 
-	Buffer_init(
-		&bufferA,
-		N_NUMBERS * sizeof(int32_t),
-		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-		VK_SHARING_MODE_EXCLUSIVE,
-		//VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-	);
+	screenPixels = (uint8_t *)malloc(WIDTH * HEIGHT * 4 * sizeof(uint8_t));
+	memset(screenPixels, 0, WIDTH * HEIGHT * 4 * sizeof(uint8_t));
 
-	Buffer_init(
-		&bufferB,
-		N_NUMBERS * sizeof(int32_t),
-		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-		VK_SHARING_MODE_EXCLUSIVE,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-		//VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-	);
+	particles.init();
 
-	/*
-	{
-		int32_t *mappedMemory = NULL;
-		vkMapMemory(gvk_device, bufferA.memory, 0, N_NUMBERS * sizeof(int32_t), 0, (void **)&mappedMemory);
-		for(int i = 0; i < N_NUMBERS; i++){
-			mappedMemory[i] = i;
+	for(int x = 0; x < 400; x++){
+		for(int y = 0; y < 250; y++){
+
+			Particle particle;
+			particle.pos = getVec2f(10.0 + x, 10.0 + y);
+			particle.velocity = getVec2f(1.0);
+			particles.push(particle);
+		
 		}
-		vkUnmapMemory(gvk_device, bufferA.memory);
-	}
-	{
-		int32_t *mappedMemory = NULL;
-		vkMapMemory(gvk_device, bufferB.memory, 0, N_NUMBERS * sizeof(int32_t), 0, (void **)&mappedMemory);
-		for(int i = 0; i < N_NUMBERS; i++){
-			mappedMemory[i] = i * 2;
-		}
-		vkUnmapMemory(gvk_device, bufferB.memory);
-	}
-	*/
-
-	//specify shader description
-	Array<VkDescriptorSetLayoutBinding> descriptorSetLayoutBindings;
-	descriptorSetLayoutBindings.init();
-
-	{
-		VkDescriptorSetLayoutBinding descriptorSetLayoutBinding = {};
-		descriptorSetLayoutBinding.binding = 0;
-		descriptorSetLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		descriptorSetLayoutBinding.descriptorCount = 1;
-		descriptorSetLayoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-		descriptorSetLayoutBindings.push(descriptorSetLayoutBinding);
-	}
-	{
-		VkDescriptorSetLayoutBinding descriptorSetLayoutBinding = {};
-		descriptorSetLayoutBinding.binding = 1;
-		descriptorSetLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		descriptorSetLayoutBinding.descriptorCount = 1;
-		descriptorSetLayoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-		descriptorSetLayoutBindings.push(descriptorSetLayoutBinding);
 	}
 
-	VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo = {};
-	descriptorSetLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	descriptorSetLayoutCreateInfo.bindingCount = descriptorSetLayoutBindings.length;
-	descriptorSetLayoutCreateInfo.pBindings = descriptorSetLayoutBindings.elements;
+	particleOccupiedGrid = (bool *)malloc((GRID_WIDTH) * (GRID_HEIGHT) * sizeof(bool));
 
-	//allocate descriptor set
-	VkDescriptorSetLayout descriptorSetLayout;
-	VkResult result = vkCreateDescriptorSetLayout(gvk_device, &descriptorSetLayoutCreateInfo, NULL, &descriptorSetLayout);
-	if(result != 0) printf("vkCreateDescriptorSetLayout result: %i\n", result);
+	edges = (Vec2f *)malloc((GRID_WIDTH + 1) * (GRID_HEIGHT + 1) * sizeof(Vec2f));
+	memset(edges, 0, (GRID_WIDTH + 1) * (GRID_HEIGHT + 1) * sizeof(Vec2f));
 
-	VkDescriptorPoolSize descriptorPoolSize = {};
-	descriptorPoolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	descriptorPoolSize.descriptorCount = descriptorSetLayoutBindings.length;
+	edgesPrevious = (Vec2f *)malloc((GRID_WIDTH + 1) * (GRID_HEIGHT + 1) * sizeof(Vec2f));
+	memset(edgesPrevious, 0, (GRID_WIDTH + 1) * (GRID_HEIGHT + 1) * sizeof(Vec2f));
 
-	VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {};
-	descriptorPoolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	descriptorPoolCreateInfo.maxSets = 1;
-	descriptorPoolCreateInfo.poolSizeCount = 1;
-	descriptorPoolCreateInfo.pPoolSizes = &descriptorPoolSize;
-
-	VkDescriptorPool descriptorPool;
-	result = vkCreateDescriptorPool(gvk_device, &descriptorPoolCreateInfo, NULL, &descriptorPool);
-	if(result != 0) printf("vkCreateDescriptorPool result: %i\n", result);
-
-	VkDescriptorSetAllocateInfo descriptorSetAllocateInfo = {};
-	descriptorSetAllocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-	descriptorSetAllocateInfo.descriptorPool = descriptorPool;
-	descriptorSetAllocateInfo.descriptorSetCount = 1;
-	descriptorSetAllocateInfo.pSetLayouts = &descriptorSetLayout;
-
-	VkDescriptorSet descriptorSet;
-	result = vkAllocateDescriptorSets(gvk_device, &descriptorSetAllocateInfo, &descriptorSet);
-	if(result != 0) printf("vkAllocateDescriptorSets result: %i\n", result);
-
-	//bind buffers to descriptor set
-	{
-		VkDescriptorBufferInfo descriptorBufferInfo = {};
-		descriptorBufferInfo.buffer = bufferA.ID;
-		descriptorBufferInfo.offset = 0;
-		descriptorBufferInfo.range = N_NUMBERS * sizeof(int32_t);
-
-		VkWriteDescriptorSet writeDescriptorSet = {};
-		writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writeDescriptorSet.dstSet = descriptorSet;
-		writeDescriptorSet.dstBinding = 0;
-		writeDescriptorSet.descriptorCount = 1;
-		writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		writeDescriptorSet.pBufferInfo = &descriptorBufferInfo;
-
-		vkUpdateDescriptorSets(gvk_device, 1, &writeDescriptorSet, 0, NULL);
-	}
-
-	{
-		VkDescriptorBufferInfo descriptorBufferInfo = {};
-		descriptorBufferInfo.buffer = bufferB.ID;
-		descriptorBufferInfo.offset = 0;
-		descriptorBufferInfo.range = N_NUMBERS * sizeof(int32_t);
-
-		VkWriteDescriptorSet writeDescriptorSet = {};
-		writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writeDescriptorSet.dstSet = descriptorSet;
-		writeDescriptorSet.dstBinding = 1;
-		writeDescriptorSet.descriptorCount = 1;
-		writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		writeDescriptorSet.pBufferInfo = &descriptorBufferInfo;
-
-		vkUpdateDescriptorSets(gvk_device, 1, &writeDescriptorSet, 0, NULL);
-	}
-
-	//read shader and create pipeline
-	long int fileSize;
-	char *data = getFileData_mustFree("shader.spv", &fileSize);
-
-	VkShaderModuleCreateInfo shaderModuleCreateInfo = {};
-	shaderModuleCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-	shaderModuleCreateInfo.pCode = (uint32_t *)data;
-	shaderModuleCreateInfo.codeSize = fileSize;
-
-	VkShaderModule shaderModule;
-	result = vkCreateShaderModule(gvk_device, &shaderModuleCreateInfo, NULL, &shaderModule);
-	if(result != 0) printf("vkCreateShaderModule result: %i\n", result);
-
-	VkPipelineShaderStageCreateInfo pipelineShaderStageCreateInfo = {};
-	pipelineShaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	pipelineShaderStageCreateInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-	pipelineShaderStageCreateInfo.module = shaderModule;
-	pipelineShaderStageCreateInfo.pName = "main";
-
-	VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
-	pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipelineLayoutCreateInfo.setLayoutCount = 1;
-	pipelineLayoutCreateInfo.pSetLayouts = &descriptorSetLayout;
-
-	VkPipelineLayout pipelineLayout;
-	result = vkCreatePipelineLayout(gvk_device, &pipelineLayoutCreateInfo, NULL, &pipelineLayout);
-	if(result != 0) printf("vkCreatePipelineLayout result: %i\n", result);
-
-	VkComputePipelineCreateInfo pipelineCreateInfo = {};
-	pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-	pipelineCreateInfo.stage = pipelineShaderStageCreateInfo;
-	pipelineCreateInfo.layout = pipelineLayout;
-
-	VkPipeline pipeline;
-	result = vkCreateComputePipelines(gvk_device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, NULL, &pipeline);
-	if(result != 0) printf("vkCreateComputePipelines result: %i\n", result);
-
-	//setup command buffer
-	VkCommandPoolCreateInfo commandPoolCreateInfo = {};
-	commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-	commandPoolCreateInfo.flags = 0;
-	commandPoolCreateInfo.queueFamilyIndex = gvk_queueFamilyIndex;
-
-	VkCommandPool commandPool;
-	result = vkCreateCommandPool(gvk_device, &commandPoolCreateInfo, NULL, &commandPool);
-	if(result != 0) printf("vkCreateCommandPool result: %i\n", result);
-
-	VkCommandBufferAllocateInfo commandBufferAllocateInfo = {};
-	commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	commandBufferAllocateInfo.commandPool = commandPool;
-	commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	commandBufferAllocateInfo.commandBufferCount = 1;
-
-	result = vkAllocateCommandBuffers(gvk_device, &commandBufferAllocateInfo, &commandBuffer);
-	if(result != 0) printf("vkAllocateCommandBuffers result: %i\n", result);
-
-	VkCommandBufferBeginInfo commandBufferBeginInfo = {};
-	commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	//commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	commandBufferBeginInfo.flags = 0;
-
-	vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
-
-	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-
-	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, NULL);
-
-	vkCmdDispatch(commandBuffer, N_NUMBERS / WORK_GROUP_SIZE, 1, 1);
-
-	vkEndCommandBuffer(commandBuffer);
-
-	//init fence
-	VkFenceCreateInfo fenceCreateInfo = {};
-	fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-	fenceCreateInfo.flags = 0;
-
-	result = vkCreateFence(gvk_device, &fenceCreateInfo, NULL, &fence);
-	if(result != 0) printf("vkCreateFence result: %i\n", result);
-
+	edgeMasses = (Vec2f *)malloc((GRID_WIDTH + 1) * (GRID_HEIGHT + 1) * sizeof(Vec2f));
+	memset(edgeMasses, 0, (GRID_WIDTH + 1) * (GRID_HEIGHT + 1) * sizeof(Vec2f));
+	
 }
 
 void Engine_initDrawing(){
@@ -234,45 +94,216 @@ void Engine_update(){
 	if(Engine_keys[ENGINE_KEY_Q].downed){
 		Engine_quit();
 	}
-
-	/*
-	{
-		long long st = getTime_us();
-
-		VkSubmitInfo submitInfo = {};
-		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &commandBuffer;
-
-		vkQueueSubmit(gvk_queue, 1, &submitInfo, fence);
-
-		vkWaitForFences(gvk_device, 1, &fence, VK_TRUE, 100000000000);
-
-		vkResetFences(gvk_device, 1, &fence);
-
-		long long et = getTime_us();
-
-		printf("time: %lli us\n", et - st);
+	if(Engine_keys[ENGINE_KEY_F].downed){
+		Engine_toggleFullscreen();
 	}
-	*/
 
-	{
-		long long st = getTime_us();
+	long long st = getTime_us();
 
-		for(int i = 0; i < N_NUMBERS / 2; i++){
-			positions[i] += velocities[i];
+	memset(particleOccupiedGrid, 0, GRID_WIDTH * GRID_HEIGHT * sizeof(bool));
+
+	memset(edges, 0, (GRID_WIDTH + 1) * (GRID_HEIGHT + 1) * sizeof(Vec2f));
+	memset(edgeMasses, 0, (GRID_WIDTH + 1) * (GRID_HEIGHT + 1) * sizeof(Vec2f));
+
+	float h = (float)WIDTH / (float)GRID_WIDTH;
+
+	long long ptgst = getTime_us();
+
+	for(int i = 0; i < particles.length; i++){
+
+		Particle *particle_p = &particles[i];
+
+		particle_p->velocity.y += PARTICLE_GRAVITY;
+
+		int x = particle_p->pos.x / h;
+		int y = particle_p->pos.y / h;
+
+		float dx = particle_p->pos.x - (float)x * h;
+		float dy = particle_p->pos.y - (float)y * h;
+
+		float weightWest  = square(dx) + square(0.5 * h - fabs(0.5 * h - dy));
+		float weightNorth = square(dy) + square(0.5 * h - fabs(0.5 * h - dx));
+		float weightEast  = square(h - dx) + square(0.5 * h - fabs(0.5 * h - dy));
+		float weightSouth = square(h - dy) + square(0.5 * h - fabs(0.5 * h - dx));
+
+		edges[gridIndex(x + 0, y + 0, GRID_WIDTH)].x += particle_p->velocity.x * weightWest;
+		edges[gridIndex(x + 0, y + 0, GRID_WIDTH)].y += particle_p->velocity.y * weightNorth;
+		edges[gridIndex(x + 1, y + 0, GRID_WIDTH)].x += particle_p->velocity.x * weightEast;
+		edges[gridIndex(x + 0, y + 1, GRID_WIDTH)].y += particle_p->velocity.y * weightSouth;
+
+		edgeMasses[gridIndex(x + 0, y + 0, GRID_WIDTH)].x += weightWest;
+		edgeMasses[gridIndex(x + 0, y + 0, GRID_WIDTH)].y += weightNorth;
+		edgeMasses[gridIndex(x + 1, y + 0, GRID_WIDTH)].x += weightEast;
+		edgeMasses[gridIndex(x + 0, y + 1, GRID_WIDTH)].y += weightSouth;
+
+		particleOccupiedGrid[gridIndex(x, y, GRID_WIDTH)] = true;
+
+	}
+
+	long long ptget = getTime_us();
+
+	long long gst = getTime_us();
+
+	for(int i = 0; i < (GRID_WIDTH + 1) * (GRID_HEIGHT + 1); i++){
+		edges[i].x /= fmax(edgeMasses[i].x, 0.0001);
+		edges[i].y /= fmax(edgeMasses[i].y, 0.0001);
+	}
+
+	float overrelaxation = 1.9;
+	float stiffness = 0.0002;
+	float restDensity = h * h;
+
+	for(int iterations = 0; iterations < 2; iterations++){
+		for(int y = 1; y < GRID_HEIGHT - 1; y++){
+			for(int x = 1; x < GRID_WIDTH - 1; x++){
+				
+				float div = + edges[gridIndex(x + 0, y + 0, GRID_WIDTH)].x
+							+ edges[gridIndex(x + 0, y + 0, GRID_WIDTH)].y
+							- edges[gridIndex(x + 1, y + 0, GRID_WIDTH)].x
+							- edges[gridIndex(x + 0, y + 1, GRID_WIDTH)].y;
+
+				div *= overrelaxation;
+
+				float density = edgeMasses[gridIndex(x, y, GRID_WIDTH)].x + edgeMasses[gridIndex(x, y, GRID_WIDTH)].y + edgeMasses[gridIndex(x + 1, y, GRID_WIDTH)].x + edgeMasses[gridIndex(x, y + 1, GRID_WIDTH)].y;
+				div += stiffness * (density - restDensity);
+
+				div *= (float)particleOccupiedGrid[gridIndex(x, y, GRID_WIDTH)];
+				
+				edges[gridIndex(x + 0, y + 0, GRID_WIDTH)].x -= div / 4.0;
+				edges[gridIndex(x + 0, y + 0, GRID_WIDTH)].y -= div / 4.0;
+				edges[gridIndex(x + 1, y + 0, GRID_WIDTH)].x += div / 4.0;
+				edges[gridIndex(x + 0, y + 1, GRID_WIDTH)].y += div / 4.0;
+
+			}
+		}
+	}
+
+	long long get = getTime_us();
+
+	memset(collisionGrid, 0, WIDTH * HEIGHT * sizeof(Vec2f) * 4);
+	memset(collisionGridCounts, 0, WIDTH * HEIGHT * sizeof(uint8_t));
+
+	long long gtpst = getTime_us();
+
+	for(int i = 0; i < particles.length; i++){
+
+		Particle *particle_p = &particles[i];
+
+		int x = particle_p->pos.x / h;
+		int y = particle_p->pos.y / h;
+
+		float dx = particle_p->pos.x - (float)x * h;
+		float dy = particle_p->pos.y - (float)y * h;
+
+		float weightWest  = square(dx) + square(0.5 * h - fabs(0.5 * h - dy));
+		float weightNorth = square(dy) + square(0.5 * h - fabs(0.5 * h - dx));
+		float weightEast  = square(h - dx) + square(0.5 * h - fabs(0.5 * h - dy));
+		float weightSouth = square(h - dy) + square(0.5 * h - fabs(0.5 * h - dx));
+
+		float picWest  = edges[gridIndex(x + 0, y + 0, GRID_WIDTH)].x;
+		float picNorth = edges[gridIndex(x + 0, y + 0, GRID_WIDTH)].y;
+		float picEast  = edges[gridIndex(x + 1, y + 0, GRID_WIDTH)].x;
+		float picSouth = edges[gridIndex(x + 0, y + 1, GRID_WIDTH)].y;
+
+		Vec2f gridVelocity = getVec2f(
+			(picWest * weightWest + picEast * weightEast) / fmax(weightWest + weightEast, 0.0001),
+			(picNorth * weightNorth + picSouth * weightSouth) / fmax(weightNorth + weightSouth, 0.0001)
+		);
+
+		particle_p->velocity = gridVelocity;
+
+		particle_p->pos += particle_p->velocity;
+
+		float GROUND_RESISTANCE = 0.7;
+
+		if(particle_p->pos.x < 10){
+			particle_p->pos.x = 10;
+			particle_p->velocity.x *= -GROUND_RESISTANCE;
+		}
+		if(particle_p->pos.y < 10){
+			particle_p->pos.y = 10;
+			particle_p->velocity.y *= -GROUND_RESISTANCE;
+		}
+		if(particle_p->pos.x > WIDTH - 10){
+			particle_p->pos.x = WIDTH - 10;
+			particle_p->velocity.x *= -GROUND_RESISTANCE;
+		}
+		if(particle_p->pos.y > HEIGHT - 10){
+			particle_p->pos.y = HEIGHT - 10;
+			particle_p->velocity.y *= -GROUND_RESISTANCE;
 		}
 
-		long long et = getTime_us();
-
-		printf("time: %lli us\n", et - st);
-	}
+		int collisionGridIndex = gridIndex(particle_p->pos, WIDTH);
+		if(collisionGridCounts[collisionGridIndex] < 4){
+			collisionGrid[collisionGridIndex][collisionGridCounts[collisionGridIndex]] = particle_p->pos;
+			collisionGridCounts[collisionGridIndex]++;
+		}
 	
-	//print(Engine_deltaTime);
+	}
+
+	long long gtpet = getTime_us();
+
+	long long cst = getTime_us();
+
+	for(int i = 0; i < particles.length; i++){
+
+		Particle *particle_p = &particles[i];
+		
+		int collisionGridIndex = gridIndex(particle_p->pos.x, particle_p->pos.y, WIDTH);
+
+		for(int j = 0; j < 4; j++){
+			Vec2f diff = particle_p->pos - collisionGrid[collisionGridIndex][j];
+			particle_p->pos += diff * (float)(dot(diff, diff) < 1.0);
+		}
+
+	}
+
+	long long cet = getTime_us();
+
+	long long et = getTime_us();
+
+	print("---");
+	printf("particle to grid time: %lli us\n", ptget - ptgst);
+	printf("grid fix time: %lli us\n", get - gst);
+	printf("grid to particle time: %lli us\n", gtpet - gtpst);
+	printf("collision time: %lli us\n", cet - cst);
+	printf("total time: %lli us\n", et - st);
 
 }
 
 void Engine_draw(){
+
+	memset(screenPixels, 0, WIDTH * HEIGHT * 4 * sizeof(uint8_t));
+
+	for(int i = 0; i < particles.length; i++){
+		int index = gridIndex(particles[i].pos, WIDTH);
+		screenPixels[index * 4 + 0] = 0;
+		screenPixels[index * 4 + 1] = 0;
+		screenPixels[index * 4 + 2] = 255;
+		screenPixels[index * 4 + 3] = 255;
+	}
+
+	Texture_free(&screenTexture);
+
+	Texture_init(&screenTexture, "screen", screenPixels, WIDTH, HEIGHT);
+
+	//draw background
+	Renderer2D_setShader(&renderer, &renderer.colorShader);
+
+	Renderer2D_setColor(&renderer, getVec4f(0.0, 0.0, 0.0, 1.0));
+
+	Renderer2D_setAlpha(&renderer, 1.0);
+
+	Renderer2D_drawRectangle(&renderer, 0, 0, Engine_clientWidth, Engine_clientHeight);
+
+	//draw particles
+	Renderer2D_setShader(&renderer, &waterShader);
+
+	Renderer2D_setTexture(&renderer, &screenTexture);
+
+	GL3D_uniformVec2f(waterShader.ID, "textureScale", getVec2f(1.0 / (float)WIDTH, 1.0 / (float)HEIGHT) * 1.5);
+
+	Renderer2D_drawRectangle(&renderer, 0, 0, Engine_clientWidth, Engine_clientHeight);
 
 }
 

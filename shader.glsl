@@ -1,21 +1,20 @@
 #version 450 core
 
-const int WORK_GROUP_SIZE = 128;
+const int WIDTH = 128 * 4;
+const int HEIGHT = 128 * 4;
 
-layout (local_size_x = WORK_GROUP_SIZE, local_size_y = 1, local_size_z = 1) in;
+const int WORK_GROUP_SIZE = 16;
 
-layout(std140, binding = 0) buffer InputBuffer{
-	ivec4 numbers[];
-}inputBuffer;
+layout (local_size_x = WORK_GROUP_SIZE, local_size_y = WORK_GROUP_SIZE, local_size_z = 1) in;
 
-layout(std140, binding = 1) buffer OutputBuffer{
-	ivec4 numbers[];
-}ouputBuffer;
+layout(std140, binding = 0) buffer Edges{
+	vec4 elements[];
+}edges;
 
 void main(){
 
-	uint bufferIndex = gl_GlobalInvocationID.x;
+	uint bufferIndex = gl_GlobalInvocationID.y * WIDTH + gl_GlobalInvocationID.x;
 
-	ouputBuffer.numbers[bufferIndex] += inputBuffer.numbers[bufferIndex];
+	edges.elements[bufferIndex] = 2 * edges.elements[bufferIndex];
 
 }
